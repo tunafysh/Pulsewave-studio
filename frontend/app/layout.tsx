@@ -1,13 +1,14 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Inter } from 'next/font/google';
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
-import { SidebarProvider } from "@/components/ui/sidebar";
+import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import AppSidebar from "@/components/appsidebar";
 import Player from "@/components/player";
 
 const inter = Inter({
-
+  subsets: ['latin'],
+  variable: '--font-inter',
 })
 
 export const metadata: Metadata = {
@@ -23,7 +24,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${inter} antialiased`}
+        className={`${inter.variable} font-sans h-screen flex flex-col antialiased`}
         suppressHydrationWarning
       >
         <ThemeProvider
@@ -31,13 +32,21 @@ export default function RootLayout({
           enableSystem
           defaultTheme="system"
           disableTransitionOnChange>
-            <SidebarProvider>
-              <AppSidebar />
-              {children}
-            </SidebarProvider>
+          <div className="flex flex-col h-screen">
+            <div className="flex-1 overflow-hidden">
+              <SidebarProvider>
+                <AppSidebar />
+                <SidebarInset className="pb-20"> {/* Add padding at bottom for player */}
+                  {children}
+                </SidebarInset>
+              </SidebarProvider>
+            </div>
+            <div className="w-full z-10">
               <Player />
+            </div>
+          </div>
         </ThemeProvider>
       </body>
     </html>
   );
-}
+} 
