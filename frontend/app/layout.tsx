@@ -4,6 +4,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import AppSidebar from "@/components/appsidebar";
+import Player from "@/components/player";
 
 const inter = Inter({
 
@@ -20,7 +21,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body
         className={`${inter} antialiased`}
         suppressHydrationWarning
@@ -31,9 +32,10 @@ export default function RootLayout({
           defaultTheme="system"
           disableTransitionOnChange>
             <SidebarProvider>
-              <AppSidebar/>
+              <AppSidebar />
               {children}
             </SidebarProvider>
+              <Player />
         </ThemeProvider>
       </body>
     </html>
