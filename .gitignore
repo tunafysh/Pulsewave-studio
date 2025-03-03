@@ -95,3 +95,7 @@ frontend/.vercel
 # typescript
 frontend/*.tsbuildinfo
 frontend/next-env.d.ts
+
+codec/target
+codec/pkg
+codec/Cargo.lock
