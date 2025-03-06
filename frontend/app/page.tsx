@@ -1,6 +1,7 @@
 "use client"
 
 import AnimatedSearchBar from "@/components/elements/animated-search-bar"
+import { ExpandableCardDemo } from "@/components/elements/card"
 import { useState } from "react"
 
 export default function Home() {
@@ -10,7 +11,12 @@ export default function Home() {
 
       <div className="flex flex-row ">
         <AnimatedSearchBar isExpanded={isExpanded} setIsExpanded={setIsExpanded} />
+        <br />
+        <br />
+        <br />
+        <br />
       </div>
+        <ExpandableCardDemo/>
     </main>
   )
 }
