@@ -30,7 +30,18 @@ export default function AppSidebar() {
     return (
         <Sidebar variant="floating" className="m-2 h-[90%] rounded-md">
             <SidebarHeader className="flex items-center justify-center p-4 flex-row">
-                {state == "expanded"? <h1 className="text-xl font-bold">Pulse<span className="text-primary">wave</span></h1> : <></>}
+              <div className="flex items-center justify-center gap-2">
+              {state == "expanded" ? (
+  <h1 className="text-xl font-bold">
+    Pulse<span className="text-primary">wave </span>
+    <span className="bg-gradient-to-r from-cyan-500 to-blue-500 bg-clip-text text-transparent">STUDIO</span>
+  </h1>
+) : (
+  <></>
+)}
+
+
+              </div>
             </SidebarHeader>
             <SidebarGroup className="h-full">
             <SidebarMenu>
