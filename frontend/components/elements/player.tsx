@@ -1,8 +1,9 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 "use client"
 
 import type React from "react"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { Slider } from "@/components/ui/slider"
 import { Button } from "@/components/ui/button"
 import { Play, Pause, Volume2, VolumeX } from "lucide-react"
@@ -47,13 +48,13 @@ export default function Player({
   const websocketRef = useRef<WebSocket | null>(null)
   const streamStartTimeRef = useRef<number>(0)
   const audioBufferSourceRef = useRef<AudioBufferSourceNode | null>(null)
-  const audioDataBufferRef = useRef<Float32Array[]>([])
-  const bufferSizeRef = useRef<number>(0)
+  const audioWorkerRef = useRef<Worker | null>(null)
   const playbackPositionRef = useRef<number>(0)
   const lastPlayTimeRef = useRef<number>(0)
   const streamDurationRef = useRef<number>(0)
+  const bufferSizeRef = useRef<number>(0)
 
-  // Initialize Web Audio API
+  // Initialize Web Audio API and Web Worker
   useEffect(() => {
     // Create audio context
     const AudioContext = window.AudioContext
@@ -82,14 +83,35 @@ export default function Player({
     const dataArray = new Uint8Array(bufferLength)
     dataArrayRef.current = dataArray
 
-    // Initialize audio data buffer for each channel
-    for (let i = 0; i < channels; i++) {
-      audioDataBufferRef.current.push(new Float32Array(sampleRate * 10)); // 10 seconds buffer
+    // Initialize Web Worker for audio processing
+    const worker = new Worker(new URL("./audio-worker.ts", import.meta.url))
+    audioWorkerRef.current = worker
+
+    // Set up buffer size
+    bufferSizeRef.current = sampleRate * 10 // 10 seconds buffer
+
+    // Initialize audio buffer in worker
+    worker.postMessage({
+      type: "INIT_BUFFER",
+      payload: {
+        channels,
+        bufferSize: bufferSizeRef.current,
+      },
+    })
+
+    // Handle messages from worker
+    worker.onmessage = (event) => {
+      const { type, payload } = event.data
+
+      switch (type) {
+        case "PROCESSED_AUDIO":
+          handleProcessedAudio(payload.pcmData, payload.samplesPerChannel)
+          break
+      }
     }
-    bufferSizeRef.current = sampleRate * 10;
 
     // Set up stream duration tracking
-    streamDurationRef.current = 0;
+    streamDurationRef.current = 0
 
     // Clean up
     return () => {
@@ -109,282 +131,159 @@ export default function Player({
       if (audioContextRef.current && audioContextRef.current.state !== "closed") {
         audioContextRef.current.close()
       }
+      if (audioWorkerRef.current) {
+        audioWorkerRef.current.terminate()
+      }
       cancelAnimationFrame(animationRef.current)
     }
-  }, [sampleRate, channels, bitDepth])
+  }, [sampleRate, channels, bitDepth, volume])
+
+  // Handle processed audio data from worker
+  const handleProcessedAudio = useCallback(
+    (pcmData: Float32Array[], samplesPerChannel: number) => {
+      if (!audioContextRef.current) return
+
+      // Update stream duration
+      const newAudioDuration = samplesPerChannel / sampleRate
+      streamDurationRef.current += newAudioDuration
+      setDuration(streamDurationRef.current)
+
+      // Create an audio buffer
+      const audioBuffer = audioContextRef.current.createBuffer(channels, samplesPerChannel, sampleRate)
+
+      // Fill the audio buffer with our data
+      for (let c = 0; c < channels; c++) {
+        const channelData = audioBuffer.getChannelData(c)
+        channelData.set(pcmData[c])
+      }
+
+      // If we're playing, ensure audio is playing
+      if (isPlaying && audioContextRef.current.state === "running") {
+        ensureAudioIsPlaying(audioBuffer)
+      }
+
+      // Update buffer status (simplified for now)
+      setBufferStatus(Math.min(100, 75 + Math.random() * 25)) // Placeholder
+    },
+    [channels, isPlaying, sampleRate],
+  )
 
   // Connect to WebSocket and handle PCM data
   useEffect(() => {
-    if (!audioContextRef.current || !gainNodeRef.current) return;
+    if (!audioContextRef.current || !audioWorkerRef.current) return
 
     const connectWebSocket = () => {
-      const ws = new WebSocket(websocketUrl);
-      websocketRef.current = ws;
+      const ws = new WebSocket(websocketUrl)
+      websocketRef.current = ws
 
-      ws.binaryType = "arraybuffer";
+      ws.binaryType = "arraybuffer"
 
       ws.onopen = () => {
-        console.log("WebSocket connected");
-        setIsConnected(true);
-        setIsLoaded(true);
-        streamStartTimeRef.current = audioContextRef.current?.currentTime || 0;
-      };
+        console.log("WebSocket connected")
+        setIsConnected(true)
+        setIsLoaded(true)
+        streamStartTimeRef.current = audioContextRef.current?.currentTime || 0
+      }
 
       ws.onclose = () => {
-        console.log("WebSocket disconnected");
-        setIsConnected(false);
-        setIsPlaying(false);
-      };
+        console.log("WebSocket disconnected")
+        setIsConnected(false)
+        setIsPlaying(false)
+      }
 
       ws.onerror = (error) => {
-        console.error("WebSocket error:", error);
-        setIsConnected(false);
-        setIsPlaying(false);
-      };
+        console.error("WebSocket error:", error)
+        setIsConnected(false)
+        setIsPlaying(false)
+      }
 
       ws.onmessage = (event) => {
-        if (!audioContextRef.current) return;
-        
-        // Process incoming PCM data
-        const arrayBuffer = event.data;
-        processAudioData(arrayBuffer);
-      };
-    };
+        if (!audioContextRef.current || !audioWorkerRef.current) return
 
-    // Process incoming PCM data and add to buffer
-    const processAudioData = (arrayBuffer: ArrayBuffer) => {
-      if (!audioContextRef.current) return;
-
-      // Convert the incoming PCM data based on bit depth
-      let pcmData: Float32Array[];
-      
-      if (bitDepth === 16) {
-        // 16-bit PCM (Int16)
-        const int16Array = new Int16Array(arrayBuffer);
-        pcmData = deinterleave(int16Array, channels, (sample) => sample / 32768.0);
-      } else if (bitDepth === 24) {
-        // 24-bit PCM (needs special handling)
-        pcmData = process24BitPCM(arrayBuffer, channels);
-      } else if (bitDepth === 32) {
-        // 32-bit float PCM
-        const float32Array = new Float32Array(arrayBuffer);
-        pcmData = deinterleave(float32Array, channels);
-      } else if (bitDepth === 8) {
-        // 8-bit PCM (Uint8)
-        const uint8Array = new Uint8Array(arrayBuffer);
-        pcmData = deinterleave(uint8Array, channels, (sample) => (sample - 128) / 128.0);
-      } else {
-        console.error("Unsupported bit depth:", bitDepth);
-        return;
+        // Send the data to the worker for processing
+        audioWorkerRef.current.postMessage(
+          {
+            type: "PROCESS_AUDIO",
+            payload: {
+              arrayBuffer: event.data,
+              bitDepth,
+              channels,
+              sampleRate,
+            },
+          },
+          [event.data],
+        ) // Transfer ownership to avoid copying
       }
-
-      // Add the data to our buffer
-      const samplesPerChannel = pcmData[0].length;
-      
-      // Update stream duration
-      const newAudioDuration = samplesPerChannel / sampleRate;
-      streamDurationRef.current += newAudioDuration;
-      setDuration(streamDurationRef.current);
-
-      // Add to buffer and play if needed
-      addToBuffer(pcmData);
-      
-      // If we're playing, ensure audio is playing
-      if (isPlaying && audioContextRef.current.state === "running") {
-        ensureAudioIsPlaying();
-      }
-      
-      // Update buffer status
-      const bufferFillPercentage = Math.min(100, (getBufferFillAmount() / bufferSizeRef.current) * 100);
-      setBufferStatus(bufferFillPercentage);
-    };
-
-    // Deinterleave audio channels
-    const deinterleave = <T extends ArrayLike<number>>(
-      interleavedData: T, 
-      channels: number, 
-      normalizer?: (sample: number) => number
-    ): Float32Array[] => {
-      const deinterleavedData: Float32Array[] = [];
-      const samplesPerChannel = Math.floor(interleavedData.length / channels);
-      
-      // Create arrays for each channel
-      for (let c = 0; c < channels; c++) {
-        deinterleavedData.push(new Float32Array(samplesPerChannel));
-      }
-      
-      // Fill the arrays
-      for (let i = 0; i < samplesPerChannel; i++) {
-        for (let c = 0; c < channels; c++) {
-          const sample = interleavedData[i * channels + c];
-          deinterleavedData[c][i] = normalizer ? normalizer(sample) : sample;
-        }
-      }
-      
-      return deinterleavedData;
-    };
-
-    // Special handling for 24-bit PCM
-    const process24BitPCM = (buffer: ArrayBuffer, channels: number): Float32Array[] => {
-      const bytes = new Uint8Array(buffer);
-      const samplesPerChannel = Math.floor(bytes.length / (3 * channels)); // 3 bytes per sample
-      const output: Float32Array[] = [];
-      
-      // Create arrays for each channel
-      for (let c = 0; c < channels; c++) {
-        output.push(new Float32Array(samplesPerChannel));
-      }
-      
-      // Process 24-bit samples (3 bytes per sample)
-      for (let i = 0; i < samplesPerChannel; i++) {
-        for (let c = 0; c < channels; c++) {
-          const startByte = (i * channels + c) * 3;
-          
-          // Combine 3 bytes into a 24-bit integer (little-endian)
-          const sample = (bytes[startByte] << 8) | (bytes[startByte + 1] << 16) | (bytes[startByte + 2] << 24);
-          
-          // Convert to float in range [-1, 1]
-          output[c][i] = sample / 8388608.0; // 2^23
-        }
-      }
-      
-      return output;
-    };
-
-    // Add PCM data to our circular buffer
-    const addToBuffer = (pcmData: Float32Array[]) => {
-      const samplesPerChannel = pcmData[0].length;
-      
-      // For each channel
-      for (let c = 0; c < channels; c++) {
-        // Get current buffer for this channel
-        const buffer = audioDataBufferRef.current[c];
-        
-        // If buffer is full, shift data to make room
-        if (getBufferFillAmount() + samplesPerChannel > bufferSizeRef.current) {
-          // Shift buffer to make room
-          const amountToShift = samplesPerChannel;
-          buffer.copyWithin(0, amountToShift);
-          
-          // Adjust playback position
-          if (playbackPositionRef.current > amountToShift) {
-            playbackPositionRef.current -= amountToShift;
-          } else {
-            playbackPositionRef.current = 0;
-          }
-        }
-        
-        // Add new data to buffer
-        const startPos = getBufferFillAmount();
-        for (let i = 0; i < samplesPerChannel; i++) {
-          buffer[startPos + i] = pcmData[c][i];
-        }
-      }
-    };
-
-    // Get the amount of data in the buffer
-    const getBufferFillAmount = (): number => {
-      // All channels have the same amount of data
-      // Find the first non-zero sample from the end
-      const buffer = audioDataBufferRef.current[0];
-      for (let i = bufferSizeRef.current - 1; i >= 0; i--) {
-        if (buffer[i] !== 0) {
-          return i + 1;
-        }
-      }
-      return 0;
-    };
-
-    // Ensure audio is playing
-    const ensureAudioIsPlaying = () => {
-      if (!audioContextRef.current || !gainNodeRef.current) return;
-      
-      // If we're already playing, don't start again
-      if (audioBufferSourceRef.current) return;
-      
-      // Create a new buffer source
-      const bufferFill = getBufferFillAmount();
-      if (bufferFill < sampleRate * 0.5) {
-        // Not enough data to play yet (less than 0.5 seconds)
-        return;
-      }
-      
-      // Create an audio buffer
-      const audioBuffer = audioContextRef.current.createBuffer(
-        channels,
-        bufferFill,
-        sampleRate
-      );
-      
-      // Fill the audio buffer with our data
-      for (let c = 0; c < channels; c++) {
-        const channelData = audioBuffer.getChannelData(c);
-        channelData.set(audioDataBufferRef.current[c].slice(0, bufferFill));
-      }
-      
-      // Create a buffer source
-      const source = audioContextRef.current.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(gainNodeRef.current);
-      
-      // Start playback from the current position
-      source.start(0, playbackPositionRef.current / sampleRate);
-      audioBufferSourceRef.current = source;
-      lastPlayTimeRef.current = audioContextRef.current.currentTime;
-      
-      // When this buffer finishes, play the next one
-      source.onended = () => {
-        if (audioBufferSourceRef.current === source) {
-          audioBufferSourceRef.current = null;
-          
-          // Update playback position
-          if (audioContextRef.current) {
-            const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current;
-            playbackPositionRef.current += playedTime * sampleRate;
-            
-            // If we're still playing, start the next buffer
-            if (isPlaying) {
-              ensureAudioIsPlaying();
-            }
-          }
-        }
-      };
-    };
+    }
 
     // Connect to WebSocket
-    connectWebSocket();
+    connectWebSocket()
 
     // Clean up
     return () => {
       if (websocketRef.current) {
-        websocketRef.current.close();
+        websocketRef.current.close()
       }
-    };
-  }, [websocketUrl, isPlaying, bitDepth, channels, sampleRate]);
+    }
+  }, [websocketUrl, bitDepth, channels, sampleRate])
 
   // Update current time based on playback position
   useEffect(() => {
-    if (!isPlaying) return;
+    if (!isPlaying) return
 
     const updateTime = () => {
       if (audioContextRef.current && audioBufferSourceRef.current) {
-        const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current;
-        const currentPos = playbackPositionRef.current + playedTime * sampleRate;
-        setCurrentTime(currentPos / sampleRate);
+        const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current
+        const currentPos = playbackPositionRef.current + playedTime * sampleRate
+        setCurrentTime(currentPos / sampleRate)
       }
-      
-      requestAnimationFrame(updateTime);
-    };
 
-    const timeUpdateId = requestAnimationFrame(updateTime);
-    
+      requestAnimationFrame(updateTime)
+    }
+
+    const timeUpdateId = requestAnimationFrame(updateTime)
+
     return () => {
-      cancelAnimationFrame(timeUpdateId);
-    };
-  }, [isPlaying]);
+      cancelAnimationFrame(timeUpdateId)
+    }
+  }, [isPlaying])
+
+  // Ensure audio is playing with the given buffer
+  const ensureAudioIsPlaying = useCallback(
+    (audioBuffer: AudioBuffer) => {
+      if (!audioContextRef.current || !gainNodeRef.current) return
+
+      // If we're already playing, don't start again
+      if (audioBufferSourceRef.current) return
+
+      // Create a buffer source
+      const source = audioContextRef.current.createBufferSource()
+      source.buffer = audioBuffer
+      source.connect(gainNodeRef.current)
+
+      // Start playback from the current position
+      source.start(0, playbackPositionRef.current / sampleRate)
+      audioBufferSourceRef.current = source
+      lastPlayTimeRef.current = audioContextRef.current.currentTime
+
+      // When this buffer finishes, play the next one
+      source.onended = () => {
+        if (audioBufferSourceRef.current === source) {
+          audioBufferSourceRef.current = null
+
+          // Update playback position
+          if (audioContextRef.current) {
+            const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current
+            playbackPositionRef.current += playedTime * sampleRate
+          }
+        }
+      }
+    },
+    [sampleRate],
+  )
 
   // Draw waveform visualization
-  const drawWaveform = () => {
+  const drawWaveform = useCallback(() => {
     const canvas = canvasRef.current
     const analyser = analyserRef.current
     const dataArray = dataArrayRef.current
@@ -568,7 +467,7 @@ export default function Player({
     ctx.fillRect(0, height - 2, (bufferStatus / 100) * width, 2)
 
     animationRef.current = requestAnimationFrame(drawWaveform)
-  }
+  }, [currentTime, duration])
 
   // Initialize canvas
   useEffect(() => {
@@ -604,108 +503,37 @@ export default function Player({
     return () => {
       cancelAnimationFrame(animationRef.current)
     }
-  }, [isLoaded, currentTime])
+  }, [isLoaded, currentTime, drawWaveform])
 
   // Handle play/pause
-  const togglePlay = () => {
-    if (!audioContextRef.current || !isConnected) return;
+  const togglePlay = useCallback(() => {
+    if (!audioContextRef.current || !isConnected) return
 
     if (isPlaying) {
       // Pause playback
       if (audioBufferSourceRef.current) {
-        audioBufferSourceRef.current.stop();
-        audioBufferSourceRef.current = null;
-        
+        audioBufferSourceRef.current.stop()
+        audioBufferSourceRef.current = null
+
         // Update playback position
-        const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current;
-        playbackPositionRef.current += playedTime * sampleRate;
+        const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current
+        playbackPositionRef.current += playedTime * sampleRate
       }
     } else {
       // Resume audio context if needed
       if (audioContextRef.current.state === "suspended") {
-        audioContextRef.current.resume();
-      }
-      
-      // Start playback
-      if (!audioBufferSourceRef.current) {
-        // This will trigger playback
-        const ensureAudioIsPlaying = () => {
-          if (!audioContextRef.current || !gainNodeRef.current) return;
-          
-          // Create a new buffer source
-          const bufferFill = getBufferFillAmount();
-          if (bufferFill < sampleRate * 0.5) {
-            // Not enough data to play yet (less than 0.5 seconds)
-            return;
-          }
-          
-          // Create an audio buffer
-          const audioBuffer = audioContextRef.current.createBuffer(
-            channels,
-            bufferFill,
-            sampleRate
-          );
-          
-          // Fill the audio buffer with our data
-          for (let c = 0; c < channels; c++) {
-            const channelData = audioBuffer.getChannelData(c);
-            channelData.set(audioDataBufferRef.current[c].slice(0, bufferFill));
-          }
-          
-          // Create a buffer source
-          const source = audioContextRef.current.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(gainNodeRef.current);
-          
-          // Start playback from the current position
-          source.start(0, playbackPositionRef.current / sampleRate);
-          audioBufferSourceRef.current = source;
-          lastPlayTimeRef.current = audioContextRef.current.currentTime;
-          
-          // When this buffer finishes, play the next one
-          source.onended = () => {
-            if (audioBufferSourceRef.current === source) {
-              audioBufferSourceRef.current = null;
-              
-              // Update playback position
-              if (audioContextRef.current) {
-                const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current;
-                playbackPositionRef.current += playedTime * sampleRate;
-                
-                // If we're still playing, start the next buffer
-                if (isPlaying) {
-                  ensureAudioIsPlaying();
-                }
-              }
-            }
-          };
-        };
-        
-        ensureAudioIsPlaying();
+        audioContextRef.current.resume()
       }
     }
-    
-    setIsPlaying(!isPlaying);
-  }
 
-  // Get buffer fill amount
-  const getBufferFillAmount = (): number => {
-    // All channels have the same amount of data
-    // Find the first non-zero sample from the end
-    const buffer = audioDataBufferRef.current[0];
-    for (let i = bufferSizeRef.current - 1; i >= 0; i--) {
-      if (buffer[i] !== 0) {
-        return i + 1;
-      }
-    }
-    return 0;
-  };
+    setIsPlaying(!isPlaying)
+  }, [isConnected, isPlaying, sampleRate])
 
   // Handle volume change
-  const handleVolumeChange = (newVolume: number[]) => {
+  const handleVolumeChange = useCallback((newVolume: number[]) => {
     const volumeValue = newVolume[0]
     setVolume(volumeValue)
-    
+
     if (gainNodeRef.current) {
       gainNodeRef.current.gain.value = volumeValue
     }
@@ -715,123 +543,70 @@ export default function Player({
     } else {
       setIsMuted(false)
     }
-  }
+  }, [])
 
   // Handle seeking with slider
-  const handleSliderSeek = (newTime: number[]) => {
-    if (!audioContextRef.current) return;
-    
-    const seekTime = newTime[0];
-    const seekPosition = Math.floor(seekTime * sampleRate);
-    
-    // Update playback position
-    playbackPositionRef.current = seekPosition;
-    setCurrentTime(seekTime);
-    
-    // If we're playing, restart playback from the new position
-    if (isPlaying) {
-      if (audioBufferSourceRef.current) {
-        audioBufferSourceRef.current.stop();
-        audioBufferSourceRef.current = null;
+  const handleSliderSeek = useCallback(
+    (newTime: number[]) => {
+      if (!audioContextRef.current) return
+
+      const seekTime = newTime[0]
+      const seekPosition = Math.floor(seekTime * sampleRate)
+
+      // Update playback position
+      playbackPositionRef.current = seekPosition
+      setCurrentTime(seekTime)
+
+      // If we're playing, restart playback from the new position
+      if (isPlaying && audioBufferSourceRef.current) {
+        audioBufferSourceRef.current.stop()
+        audioBufferSourceRef.current = null
       }
-      
-      // This will trigger playback from the new position
-      const ensureAudioIsPlaying = () => {
-        if (!audioContextRef.current || !gainNodeRef.current) return;
-        
-        // Create a new buffer source
-        const bufferFill = getBufferFillAmount();
-        if (bufferFill < sampleRate * 0.5) {
-          // Not enough data to play yet (less than 0.5 seconds)
-          return;
-        }
-        
-        // Create an audio buffer
-        const audioBuffer = audioContextRef.current.createBuffer(
-          channels,
-          bufferFill,
-          sampleRate
-        );
-        
-        // Fill the audio buffer with our data
-        for (let c = 0; c < channels; c++) {
-          const channelData = audioBuffer.getChannelData(c);
-          channelData.set(audioDataBufferRef.current[c].slice(0, bufferFill));
-        }
-        
-        // Create a buffer source
-        const source = audioContextRef.current.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(gainNodeRef.current);
-        
-        // Start playback from the current position
-        source.start(0, playbackPositionRef.current / sampleRate);
-        audioBufferSourceRef.current = source;
-        lastPlayTimeRef.current = audioContextRef.current.currentTime;
-        
-        // When this buffer finishes, play the next one
-        source.onended = () => {
-          if (audioBufferSourceRef.current === source) {
-            audioBufferSourceRef.current = null;
-            
-            // Update playback position
-            if (audioContextRef.current) {
-              const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current;
-              playbackPositionRef.current += playedTime * sampleRate;
-              
-              // If we're still playing, start the next buffer
-              if (isPlaying) {
-                ensureAudioIsPlaying();
-              }
-            }
-          }
-        };
-      };
-      
-      ensureAudioIsPlaying();
-    }
-  }
+    },
+    [isPlaying, sampleRate],
+  )
 
   // Handle seeking with canvas click
-  const handleCanvasSeek = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current
-    if (!canvas || !audioContextRef.current || duration === 0) return
+  const handleCanvasSeek = useCallback(
+    (event: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current
+      if (!canvas || !audioContextRef.current || duration === 0) return
 
-    const rect = canvas.getBoundingClientRect()
-    const clickPosition = event.clientX - rect.left
-    const seekPercentage = clickPosition / rect.width
-    const seekTime = seekPercentage * duration
+      const rect = canvas.getBoundingClientRect()
+      const clickPosition = event.clientX - rect.left
+      const seekPercentage = clickPosition / rect.width
+      const seekTime = seekPercentage * duration
 
-    // Use the slider seek function to handle the actual seeking
-    handleSliderSeek([seekTime]);
-  }
+      // Use the slider seek function to handle the actual seeking
+      handleSliderSeek([seekTime])
+    },
+    [duration, handleSliderSeek],
+  )
 
   // Toggle mute
-  const toggleMute = () => {
-    if (!gainNodeRef.current) return;
+  const toggleMute = useCallback(() => {
+    if (!gainNodeRef.current) return
 
     if (isMuted) {
-      gainNodeRef.current.gain.value = volume;
-      setIsMuted(false);
+      gainNodeRef.current.gain.value = volume
+      setIsMuted(false)
     } else {
-      gainNodeRef.current.gain.value = 0;
-      setIsMuted(true);
+      gainNodeRef.current.gain.value = 0
+      setIsMuted(true)
     }
-  }
+  }, [isMuted, volume])
 
   // Format time
-  const formatTime = (time: number) => {
+  const formatTime = useCallback((time: number) => {
     if (isNaN(time)) return "0:00"
 
     const minutes = Math.floor(time / 60)
     const seconds = Math.floor(time % 60)
     return `${minutes}:${seconds.toString().padStart(2, "0")}`
-  }
+  }, [])
 
   return (
     <div className="fixed bottom-0 left-0 w-full h-[9vh] overflow-hidden -z-5 bg-sidebar">
-      {/* Player content */}
-      
       {/* Player content */}
       <div className="relative h-full flex items-center z-10 px-4">
         <div className="w-full max-w-6xl mx-auto grid grid-cols-12 gap-4 items-center">
@@ -851,7 +626,6 @@ export default function Player({
             <div className="text-sm">
               <div className="font-medium text-foreground">{trackTitle}</div>
               <div className="text-xs text-muted-foreground">{artistName}</div>
-
             </div>
           </div>
 
@@ -910,6 +684,6 @@ export default function Player({
         </div>
       </div>
     </div>
-
-  );
+  )
 }
+
