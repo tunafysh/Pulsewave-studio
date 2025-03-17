@@ -21,7 +21,7 @@ class RedirectToNextjs
             $newUrl = str_replace('localhost:8000', 'localhost:3000', $url);
             return redirect($newUrl);
         }
-        
+
         return $next($request);
     }
 }

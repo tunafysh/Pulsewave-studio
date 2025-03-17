@@ -13,13 +13,13 @@ Route::middleware('api')->group(function () {
             'status'=> 'error',
             'message' => 'No users found',
         ]);
-    } else {
-        return response()->json([
-            'status'=> 'success',
-            'users' => $users,
-        ]);
-    };
-});
+        } else {
+            return response()->json([
+                'status'=> 'success',
+                'users' => $users,
+            ]);
+        };
+    });
 
 Route::post('/users', function () {
     User::create([
@@ -41,6 +41,19 @@ Route::put('/users', function () {
 
 Route::delete('/users', function () {
     User::find(request('id'))->delete(); 
+});
+
+Route::get('/audio', function () {
+    $contents = file_get_contents(public_path('sample.pcm'));
+    return response($contents, 200);
+});
+
+Route::get('/audio/data', function () {
+    return response()->json([
+        'image' => '',
+        'title' => "Deli (Nick`s version)",
+        'artist' => "Ice Spice, Nicki Minaj",
+    ]);
 });
 });
 ?>

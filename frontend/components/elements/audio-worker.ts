@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 // This worker handles audio processing tasks off the main thread
 
 // Define message types for type safety

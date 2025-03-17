@@ -8,11 +8,12 @@ import { Slider } from "@/components/ui/slider"
 import { Button } from "@/components/ui/button"
 import { Play, Pause, Volume2, VolumeX } from "lucide-react"
 import Image from "next/image"
+import Konami from "react-konami"
 
 interface PlayerProps {
   img: string
   isBlurred?: boolean
-  websocketUrl?: string
+  httpUrl?: string
   trackTitle?: string
   artistName?: string
   sampleRate?: number
@@ -22,9 +23,9 @@ interface PlayerProps {
 
 export default function Player({
   img = "",
-  websocketUrl = "ws://localhost:8080/audio",
+  httpUrl = "http://localhost:8000/api/audio",
   trackTitle = "Live Stream",
-  artistName = "WebSocket PCM",
+  artistName = "HTTP PCM",
   sampleRate = 44100,
   channels = 2,
   bitDepth = 16,
@@ -37,6 +38,14 @@ export default function Player({
   const [isLoaded, setIsLoaded] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [bufferStatus, setBufferStatus] = useState(0) // 0-100% buffer fill
+  const [rainbowMode, setRainbowMode] = useState(false)
+  const [isMetadataLoading, setIsMetadataLoading] = useState(false)
+  // Add this state to store the extended props
+  const [extendedProps, setExtendedProps] = useState({
+    img,
+    trackTitle,
+    artistName,
+  })
 
   // Audio analysis refs
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -45,7 +54,6 @@ export default function Player({
   const analyserRef = useRef<AnalyserNode | null>(null)
   const gainNodeRef = useRef<GainNode | null>(null)
   const dataArrayRef = useRef<Uint8Array | null>(null)
-  const websocketRef = useRef<WebSocket | null>(null)
   const streamStartTimeRef = useRef<number>(0)
   const audioBufferSourceRef = useRef<AudioBufferSourceNode | null>(null)
   const audioWorkerRef = useRef<Worker | null>(null)
@@ -53,6 +61,7 @@ export default function Player({
   const lastPlayTimeRef = useRef<number>(0)
   const streamDurationRef = useRef<number>(0)
   const bufferSizeRef = useRef<number>(0)
+  const refreshCountRef = useRef<number>(0)
 
   // Initialize Web Audio API and Web Worker
   useEffect(() => {
@@ -107,6 +116,16 @@ export default function Player({
         case "PROCESSED_AUDIO":
           handleProcessedAudio(payload.pcmData, payload.samplesPerChannel)
           break
+        case "METADATA":
+          // If the worker sends metadata, update it
+          if (payload && (payload.image || payload.title || payload.artist)) {
+            setExtendedProps((prev) => ({
+              img: payload.image || prev.img,
+              trackTitle: payload.title || prev.trackTitle,
+              artistName: payload.artist || prev.artistName,
+            }))
+          }
+          break
       }
     }
 
@@ -115,9 +134,6 @@ export default function Player({
 
     // Clean up
     return () => {
-      if (websocketRef.current) {
-        websocketRef.current.close()
-      }
       if (audioBufferSourceRef.current) {
         audioBufferSourceRef.current.stop()
         audioBufferSourceRef.current.disconnect()
@@ -168,64 +184,92 @@ export default function Player({
     [channels, isPlaying, sampleRate],
   )
 
-  // Connect to WebSocket and handle PCM data
+  // Function to fetch metadata
+  const fetchMetadata = useCallback(async () => {
+    setIsMetadataLoading(true)
+    try {
+      console.log("Fetching metadata from:", "http://localhost:8000/api/audio/data")
+      const response = await fetch("http://localhost:8000/api/audio/data")
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const data = await response.json()
+      console.log("Metadata received:", data)
+
+      // Update state with the fetched metadata (extending the props)
+      setExtendedProps({
+        img: data.image || img,
+        trackTitle: data.title || trackTitle,
+        artistName: data.artist || artistName,
+      })
+    } catch (error) {
+      console.error("Error fetching metadata:", error)
+      // Keep using the original props as fallback
+    } finally {
+      setIsMetadataLoading(false)
+    }
+  }, [img, trackTitle, artistName])
+
+  // Replace the WebSocket connection useEffect with HTTP fetch
   useEffect(() => {
     if (!audioContextRef.current || !audioWorkerRef.current) return
 
-    const connectWebSocket = () => {
-      const ws = new WebSocket(websocketUrl)
-      websocketRef.current = ws
+    const fetchAudioData = async () => {
+      try {
+        setIsLoaded(false)
+        console.log("Fetching audio data from:", httpUrl)
 
-      ws.binaryType = "arraybuffer"
+        const response = await fetch(httpUrl)
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
 
-      ws.onopen = () => {
-        console.log("WebSocket connected")
+        // Get the audio data as ArrayBuffer
+        const arrayBuffer = await response.arrayBuffer()
+        console.log("Audio data received, size:", arrayBuffer.byteLength)
+
         setIsConnected(true)
         setIsLoaded(true)
         streamStartTimeRef.current = audioContextRef.current?.currentTime || 0
-      }
 
-      ws.onclose = () => {
-        console.log("WebSocket disconnected")
-        setIsConnected(false)
-        setIsPlaying(false)
-      }
-
-      ws.onerror = (error) => {
-        console.error("WebSocket error:", error)
-        setIsConnected(false)
-        setIsPlaying(false)
-      }
-
-      ws.onmessage = (event) => {
-        if (!audioContextRef.current || !audioWorkerRef.current) return
-
-        // Send the data to the worker for processing
-        audioWorkerRef.current.postMessage(
-          {
-            type: "PROCESS_AUDIO",
-            payload: {
-              arrayBuffer: event.data,
-              bitDepth,
-              channels,
-              sampleRate,
+        // Process the audio data
+        if (audioWorkerRef.current) {
+          audioWorkerRef.current.postMessage(
+            {
+              type: "PROCESS_AUDIO",
+              payload: {
+                arrayBuffer,
+                bitDepth,
+                channels,
+                sampleRate,
+              },
             },
-          },
-          [event.data],
-        ) // Transfer ownership to avoid copying
+            [arrayBuffer.slice(0)], // Clone to transfer ownership
+          )
+        }
+
+        // Fetch metadata when audio is loaded
+        fetchMetadata()
+      } catch (error) {
+        console.error("Error fetching audio data:", error)
+        setIsConnected(false)
+        setIsPlaying(false)
       }
     }
 
-    // Connect to WebSocket
-    connectWebSocket()
+    // Fetch audio data when component mounts
+    fetchAudioData()
 
-    // Clean up
+    // Clean up function
     return () => {
-      if (websocketRef.current) {
-        websocketRef.current.close()
+      if (audioBufferSourceRef.current) {
+        audioBufferSourceRef.current.stop()
+        audioBufferSourceRef.current.disconnect()
       }
     }
-  }, [websocketUrl, bitDepth, channels, sampleRate])
+  }, [httpUrl, bitDepth, channels, sampleRate, fetchMetadata, refreshCountRef.current])
 
   // Update current time based on playback position
   useEffect(() => {
@@ -247,6 +291,12 @@ export default function Player({
       cancelAnimationFrame(timeUpdateId)
     }
   }, [isPlaying])
+
+  // Add Konami code handler
+  function easterEgg() {
+    setRainbowMode((prev) => !prev)
+    console.log("🌈 Rainbow mode activated!")
+  }
 
   // Ensure audio is playing with the given buffer
   const ensureAudioIsPlaying = useCallback(
@@ -409,7 +459,19 @@ export default function Player({
       ctx.closePath()
 
       // Fill with the played color
-      ctx.fillStyle = "hsl(178, 51%, 51%)"
+      if (rainbowMode) {
+        const gradient = ctx.createLinearGradient(0, 0, width, 0)
+        gradient.addColorStop(0, "hsl(0, 100%, 50%)") // Red
+        gradient.addColorStop(0.17, "hsl(60, 100%, 50%)") // Yellow
+        gradient.addColorStop(0.33, "hsl(120, 100%, 50%)") // Green
+        gradient.addColorStop(0.5, "hsl(180, 100%, 50%)") // Cyan
+        gradient.addColorStop(0.67, "hsl(240, 100%, 50%)") // Blue
+        gradient.addColorStop(0.83, "hsl(270, 100%, 50%)") // Purple
+        gradient.addColorStop(1, "hsl(300, 100%, 50%)") // Pink
+        ctx.fillStyle = gradient
+      } else {
+        ctx.fillStyle = "hsl(178, 51%, 51%)"
+      }
       ctx.fill()
     }
 
@@ -458,7 +520,19 @@ export default function Player({
       ctx.closePath()
 
       // Fill with the unplayed color
-      ctx.fillStyle = "hsla(178, 51%, 51%, 0.3)"
+      if (rainbowMode) {
+        const gradient = ctx.createLinearGradient(0, 0, width, 0)
+        gradient.addColorStop(0, "hsla(0, 100%, 50%, 0.3)")
+        gradient.addColorStop(0.17, "hsla(60, 100%, 50%, 0.3)")
+        gradient.addColorStop(0.33, "hsla(120, 100%, 50%, 0.3)")
+        gradient.addColorStop(0.5, "hsla(180, 100%, 50%, 0.3)")
+        gradient.addColorStop(0.67, "hsla(240, 100%, 50%, 0.3)")
+        gradient.addColorStop(0.83, "hsla(270, 100%, 50%, 0.3)")
+        gradient.addColorStop(1, "hsla(300, 100%, 50%, 0.3)")
+        ctx.fillStyle = gradient
+      } else {
+        ctx.fillStyle = "hsla(178, 51%, 51%, 0.3)"
+      }
       ctx.fill()
     }
 
@@ -467,7 +541,7 @@ export default function Player({
     ctx.fillRect(0, height - 2, (bufferStatus / 100) * width, 2)
 
     animationRef.current = requestAnimationFrame(drawWaveform)
-  }, [currentTime, duration])
+  }, [currentTime, duration, rainbowMode])
 
   // Initialize canvas
   useEffect(() => {
@@ -605,27 +679,92 @@ export default function Player({
     return `${minutes}:${seconds.toString().padStart(2, "0")}`
   }, [])
 
+  // Handle refresh button click
+  const handleRefresh = useCallback(() => {
+    // Reset playback and fetch new data
+    if (audioBufferSourceRef.current) {
+      audioBufferSourceRef.current.stop()
+      audioBufferSourceRef.current = null
+    }
+    playbackPositionRef.current = 0
+    setCurrentTime(0)
+
+    // Increment refresh counter to trigger useEffect
+    refreshCountRef.current += 1
+
+    // Trigger a new fetch by re-running the effect
+    const fetchAudioData = async () => {
+      try {
+        setIsLoaded(false)
+        const response = await fetch(httpUrl)
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
+
+        const arrayBuffer = await response.arrayBuffer()
+
+        if (audioWorkerRef.current) {
+          audioWorkerRef.current.postMessage(
+            {
+              type: "PROCESS_AUDIO",
+              payload: {
+                arrayBuffer,
+                bitDepth,
+                channels,
+                sampleRate,
+              },
+            },
+            [arrayBuffer.slice(0)],
+          )
+        }
+
+        setIsLoaded(true)
+
+        // Also refresh metadata
+        fetchMetadata()
+      } catch (error) {
+        console.error("Error refreshing audio data:", error)
+      }
+    }
+
+    fetchAudioData()
+  }, [httpUrl, bitDepth, channels, sampleRate, fetchMetadata])
+
   return (
     <div className="fixed bottom-0 left-0 w-full h-[9vh] overflow-hidden -z-5 bg-sidebar">
+      <Konami easterEgg={easterEgg} />
       {/* Player content */}
       <div className="relative h-full flex items-center z-10 px-4">
         <div className="w-full max-w-6xl mx-auto grid grid-cols-12 gap-4 items-center">
           {/* Track info - 3 columns */}
           <div className="col-span-3 flex items-center gap-3">
-            <div className={`h-12 w-12 rounded-md overflow-hidden flex-shrink-0 ${img == "" ? "hidden" : ""}`}>
-              {img && (
+            <div className={`h-12 w-12 rounded-md overflow-hidden flex-shrink-0 ${extendedProps.img ? "" : "hidden"}`}>
+              {extendedProps.img && (
                 <Image
                   width={48}
                   height={48}
-                  src={img || "/placeholder.svg"}
+                  src={extendedProps.img || "/placeholder.svg"}
                   alt="Album cover"
                   className="h-full w-full object-cover"
+                  crossOrigin="anonymous"
                 />
               )}
             </div>
             <div className="text-sm">
-              <div className="font-medium text-foreground">{trackTitle}</div>
-              <div className="text-xs text-muted-foreground">{artistName}</div>
+              <div className="font-medium text-foreground">
+                {isMetadataLoading ? (
+                  <span className="inline-block w-24 h-4 bg-muted animate-pulse rounded"></span>
+                ) : (
+                  extendedProps.trackTitle
+                )}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {isMetadataLoading ? (
+                  <span className="inline-block w-16 h-3 bg-muted animate-pulse rounded mt-1"></span>
+                ) : (
+                  extendedProps.artistName
+                )}
+              </div>
             </div>
           </div>
 
@@ -680,6 +819,31 @@ export default function Player({
               className="w-24"
               disabled={!isConnected}
             />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-transparent"
+              onClick={handleRefresh}
+              disabled={!isConnected}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="lucide lucide-refresh-cw"
+              >
+                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+                <path d="M21 3v5h-5" />
+                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+                <path d="M3 21v-5h5" />
+              </svg>
+            </Button>
           </div>
         </div>
       </div>
