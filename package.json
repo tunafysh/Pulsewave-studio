@@ -6,6 +6,7 @@
         "build": "vite build"
     },
     "devDependencies": {
+        "@chakra-ui/cli": "^3.13.0",
         "@tailwindcss/vite": "^4.0.9",
         "axios": "^1.8.1",
         "concurrently": "^9.1.2",

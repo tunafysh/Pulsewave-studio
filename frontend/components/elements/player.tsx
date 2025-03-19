@@ -1,14 +1,14 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable react-hooks/exhaustive-deps */
 "use client"
 
-import type React from "react"
-
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Slider } from "@/components/ui/slider"
 import { Button } from "@/components/ui/button"
-import { Play, Pause, Volume2, VolumeX } from "lucide-react"
+import { Play, Pause } from "lucide-react"
 import Image from "next/image"
 import Konami from "react-konami"
+import ElasticSliderVariant1 from "../ui/elastic-slider"
+import AudioVisualizer from "./audio-visualizer"
 
 interface PlayerProps {
   img: string
@@ -34,7 +34,6 @@ export default function Player({
   const [duration, setDuration] = useState(0)
   const [currentTime, setCurrentTime] = useState(0)
   const [volume, setVolume] = useState(0.7)
-  const [isMuted, setIsMuted] = useState(false)
   const [isLoaded, setIsLoaded] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [bufferStatus, setBufferStatus] = useState(0) // 0-100% buffer fill
@@ -48,8 +47,6 @@ export default function Player({
   })
 
   // Audio analysis refs
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const animationRef = useRef<number>(0)
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const gainNodeRef = useRef<GainNode | null>(null)
@@ -62,6 +59,7 @@ export default function Player({
   const streamDurationRef = useRef<number>(0)
   const bufferSizeRef = useRef<number>(0)
   const refreshCountRef = useRef<number>(0)
+  const pcmDataRef = useRef<Float32Array[]>([]) // Store PCM data for reuse
 
   // Initialize Web Audio API and Web Worker
   useEffect(() => {
@@ -114,7 +112,15 @@ export default function Player({
 
       switch (type) {
         case "PROCESSED_AUDIO":
-          handleProcessedAudio(payload.pcmData, payload.samplesPerChannel)
+          console.log("Received processed audio from worker", {
+            samplesPerChannel: payload.samplesPerChannel,
+            duration: payload.duration,
+            channels: payload.pcmData.length,
+          })
+          handleProcessedAudio(payload.pcmData, payload.samplesPerChannel, payload.duration)
+          break
+        case "BUFFER_INITIALIZED":
+          console.log("Buffer initialized in worker", payload)
           break
         case "METADATA":
           // If the worker sends metadata, update it
@@ -125,6 +131,9 @@ export default function Player({
               artistName: payload.artist || prev.artistName,
             }))
           }
+          break
+        case "ERROR":
+          console.error("Worker error:", payload)
           break
       }
     }
@@ -150,19 +159,26 @@ export default function Player({
       if (audioWorkerRef.current) {
         audioWorkerRef.current.terminate()
       }
-      cancelAnimationFrame(animationRef.current)
     }
   }, [sampleRate, channels, bitDepth, volume])
 
   // Handle processed audio data from worker
   const handleProcessedAudio = useCallback(
-    (pcmData: Float32Array[], samplesPerChannel: number) => {
+    (pcmData: Float32Array[], samplesPerChannel: number, audioDuration: number) => {
       if (!audioContextRef.current) return
 
-      // Update stream duration
-      const newAudioDuration = samplesPerChannel / sampleRate
-      streamDurationRef.current += newAudioDuration
-      setDuration(streamDurationRef.current)
+      console.log("Processing audio data", {
+        channels: pcmData.length,
+        samplesPerChannel,
+        audioDuration,
+      })
+
+      // Store PCM data for reuse
+      pcmDataRef.current = pcmData
+
+      // Update stream duration with accurate duration from worker
+      streamDurationRef.current = audioDuration
+      setDuration(audioDuration)
 
       // Create an audio buffer
       const audioBuffer = audioContextRef.current.createBuffer(channels, samplesPerChannel, sampleRate)
@@ -178,8 +194,10 @@ export default function Player({
         ensureAudioIsPlaying(audioBuffer)
       }
 
-      // Update buffer status (simplified for now)
-      setBufferStatus(Math.min(100, 75 + Math.random() * 25)) // Placeholder
+      // Update buffer status
+      setBufferStatus(100) // Fully loaded
+
+      console.log("Audio buffer created and ready for playback")
     },
     [channels, isPlaying, sampleRate],
   )
@@ -212,6 +230,25 @@ export default function Player({
     }
   }, [img, trackTitle, artistName])
 
+  // Add a function to fetch available audio files
+  // const fetchAvailableFiles = useCallback(async () => {
+  //   try {
+  //     const response = await fetch("http://localhost:8000/api/audio/list")
+  //     if (!response.ok) {
+  //       throw new Error(`HTTP error! status: ${response.status}`)
+  //     }
+
+  //     const data = await response.json()
+  //     console.log("Available audio files:", data.files)
+
+  //     // You can use this data to create a playlist or file selector
+  //     return data.files
+  //   } catch (error) {
+  //     console.error("Error fetching available files:", error)
+  //     return []
+  //   }
+  // }, [])
+
   // Replace the WebSocket connection useEffect with HTTP fetch
   useEffect(() => {
     if (!audioContextRef.current || !audioWorkerRef.current) return
@@ -234,20 +271,38 @@ export default function Player({
         setIsLoaded(true)
         streamStartTimeRef.current = audioContextRef.current?.currentTime || 0
 
-        // Process the audio data
+        // Resume audio context if it was suspended (needed for Chrome)
+        if (audioContextRef.current?.state === "suspended") {
+          await audioContextRef.current.resume()
+          console.log("Audio context resumed")
+        }
+
+        // Process the audio data - create a copy to avoid transfer issues
         if (audioWorkerRef.current) {
-          audioWorkerRef.current.postMessage(
-            {
+          try {
+            // Create a copy of the array buffer to avoid transfer issues
+            const arrayBufferCopy = arrayBuffer.slice(0)
+
+            console.log("Sending audio data to worker for processing", {
+              size: arrayBufferCopy.byteLength,
+              bitDepth,
+              channels,
+              sampleRate,
+            })
+
+            audioWorkerRef.current.postMessage({
               type: "PROCESS_AUDIO",
               payload: {
-                arrayBuffer,
+                arrayBuffer: arrayBufferCopy,
                 bitDepth,
                 channels,
                 sampleRate,
               },
-            },
-            [arrayBuffer.slice(0)], // Clone to transfer ownership
-          )
+            })
+          } catch (error) {
+            console.error("Error posting message to worker:", error)
+            throw error
+          }
         }
 
         // Fetch metadata when audio is loaded
@@ -290,7 +345,7 @@ export default function Player({
     return () => {
       cancelAnimationFrame(timeUpdateId)
     }
-  }, [isPlaying])
+  }, [isPlaying, sampleRate])
 
   // Add Konami code handler
   function easterEgg() {
@@ -303,8 +358,17 @@ export default function Player({
     (audioBuffer: AudioBuffer) => {
       if (!audioContextRef.current || !gainNodeRef.current) return
 
-      // If we're already playing, don't start again
-      if (audioBufferSourceRef.current) return
+      console.log("Starting audio playback", {
+        position: playbackPositionRef.current / sampleRate,
+        bufferDuration: audioBuffer.duration,
+      })
+
+      // If we're already playing, stop the current source
+      if (audioBufferSourceRef.current) {
+        audioBufferSourceRef.current.stop()
+        audioBufferSourceRef.current.disconnect()
+        audioBufferSourceRef.current = null
+      }
 
       // Create a buffer source
       const source = audioContextRef.current.createBufferSource()
@@ -312,12 +376,14 @@ export default function Player({
       source.connect(gainNodeRef.current)
 
       // Start playback from the current position
-      source.start(0, playbackPositionRef.current / sampleRate)
+      const startPosition = Math.min(playbackPositionRef.current / sampleRate, audioBuffer.duration - 0.01)
+      source.start(0, startPosition)
       audioBufferSourceRef.current = source
       lastPlayTimeRef.current = audioContextRef.current.currentTime
 
       // When this buffer finishes, play the next one
       source.onended = () => {
+        console.log("Audio buffer playback ended")
         if (audioBufferSourceRef.current === source) {
           audioBufferSourceRef.current = null
 
@@ -332,293 +398,6 @@ export default function Player({
     [sampleRate],
   )
 
-  // Draw waveform visualization
-  const drawWaveform = useCallback(() => {
-    const canvas = canvasRef.current
-    const analyser = analyserRef.current
-    const dataArray = dataArrayRef.current
-
-    if (!canvas || !analyser || !dataArray) return
-
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return
-
-    // Get frequency data
-    analyser.getByteFrequencyData(dataArray)
-
-    // Clear canvas
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-    // Calculate dimensions
-    const width = canvas.width
-    const height = canvas.height
-    const progressPosition = (currentTime / Math.max(duration, 1)) * width
-
-    // We'll use a subset of the frequency data (focus on audible range)
-    const usableDataLength = Math.min(dataArray.length, 160) // Focus on lower frequencies
-
-    // Number of segments to draw
-    const segmentCount = 150
-    const segmentWidth = width / segmentCount
-
-    // Draw the waveform using a simplified approach
-    // First, create an array of heights
-    const heights = []
-
-    for (let i = 0; i < segmentCount; i++) {
-      // Calculate normalized position (0 to 1)
-      const normalizedPosition = i / (segmentCount - 1)
-
-      // Create a symmetrical pattern where the middle has the highest values
-      const patternPosition =
-        normalizedPosition <= 0.5
-          ? (1 - normalizedPosition) * 2 // 0 to 1 (first half)
-          : normalizedPosition * 2 - 1 // 1 to 0 (second half)
-
-      // Map this position to our frequency data
-      const dataIndex = Math.floor(patternPosition * usableDataLength * 0.5)
-
-      // Get the frequency value and normalize it
-      const frequencyValue = dataArray[dataIndex]
-      const normalizedValue = frequencyValue / 255
-
-      // Apply non-linear scaling to boost visibility of quieter sounds
-      const sensitivity = 1.2
-      const boostedValue = Math.pow(normalizedValue, 0.7) * sensitivity
-
-      // Calculate height with a minimum to ensure visibility
-      const minHeight = height * 0.1
-      const maxHeight = height * 0.8
-      const barHeight = minHeight + boostedValue * (maxHeight - minHeight)
-
-      heights.push(barHeight)
-    }
-
-    // Apply additional smoothing to the heights
-    const smoothedHeights = []
-    const smoothingFactor = 3 // Higher = more smoothing
-
-    for (let i = 0; i < heights.length; i++) {
-      let sum = 0
-      let count = 0
-
-      // Average the heights around this point
-      for (let j = Math.max(0, i - smoothingFactor); j <= Math.min(heights.length - 1, i + smoothingFactor); j++) {
-        sum += heights[j]
-        count++
-      }
-
-      smoothedHeights.push(sum / count)
-    }
-
-    // Calculate the center line of the waveform
-    const centerY = height / 2
-
-    // Draw the played portion
-    if (progressPosition > 0) {
-      ctx.beginPath()
-
-      // Start at the center-left
-      ctx.moveTo(0, centerY)
-
-      // Draw the top curve
-      for (let i = 0; i < segmentCount; i++) {
-        const x = i * segmentWidth
-        if (x > progressPosition) break
-
-        const barHeight = smoothedHeights[i]
-        const y = centerY - barHeight / 2
-
-        ctx.lineTo(x, y)
-      }
-
-      // Find the exact progress position
-      const progressIndex = Math.min(segmentCount - 1, Math.floor(progressPosition / segmentWidth))
-      const progressX = progressPosition
-      const progressBarHeight = smoothedHeights[progressIndex]
-      const progressTopY = centerY - progressBarHeight / 2
-
-      // Draw a line to the exact progress position
-      ctx.lineTo(progressX, progressTopY)
-
-      // Draw a line down to the bottom of the waveform at the progress position
-      const progressBottomY = centerY + progressBarHeight / 2
-      ctx.lineTo(progressX, progressBottomY)
-
-      // Draw the bottom curve (mirror of the top)
-      for (let i = progressIndex; i >= 0; i--) {
-        const x = i * segmentWidth
-        const barHeight = smoothedHeights[i]
-        const y = centerY + barHeight / 2
-
-        ctx.lineTo(x, y)
-      }
-
-      // Close the path back to the start
-      ctx.lineTo(0, centerY)
-      ctx.closePath()
-
-      // Fill with the played color
-      if (rainbowMode) {
-        const gradient = ctx.createLinearGradient(0, 0, width, 0)
-        gradient.addColorStop(0, "hsl(0, 100%, 50%)") // Red
-        gradient.addColorStop(0.17, "hsl(60, 100%, 50%)") // Yellow
-        gradient.addColorStop(0.33, "hsl(120, 100%, 50%)") // Green
-        gradient.addColorStop(0.5, "hsl(180, 100%, 50%)") // Cyan
-        gradient.addColorStop(0.67, "hsl(240, 100%, 50%)") // Blue
-        gradient.addColorStop(0.83, "hsl(270, 100%, 50%)") // Purple
-        gradient.addColorStop(1, "hsl(300, 100%, 50%)") // Pink
-        ctx.fillStyle = gradient
-      } else {
-        ctx.fillStyle = "hsl(178, 51%, 51%)"
-      }
-      ctx.fill()
-    }
-
-    // Draw the unplayed portion
-    if (progressPosition < width) {
-      ctx.beginPath()
-
-      // Find the exact progress position
-      const progressIndex = Math.min(segmentCount - 1, Math.floor(progressPosition / segmentWidth))
-      const progressX = progressPosition
-      const progressBarHeight = smoothedHeights[progressIndex]
-      const progressTopY = centerY - progressBarHeight / 2
-
-      // Start at the top of the progress position
-      ctx.moveTo(progressX, progressTopY)
-
-      // Draw the top curve from progress to end
-      for (let i = progressIndex + 1; i < segmentCount; i++) {
-        const x = i * segmentWidth
-        const barHeight = smoothedHeights[i]
-        const y = centerY - barHeight / 2
-
-        ctx.lineTo(x, y)
-      }
-
-      // Draw a line to the bottom-right corner of the last segment
-      const lastIndex = segmentCount - 1
-      const lastX = lastIndex * segmentWidth
-      const lastBarHeight = smoothedHeights[lastIndex]
-      const lastBottomY = centerY + lastBarHeight / 2
-
-      ctx.lineTo(lastX, lastBottomY)
-
-      // Draw the bottom curve from end back to progress
-      for (let i = segmentCount - 2; i >= progressIndex; i--) {
-        const x = i * segmentWidth
-        const barHeight = smoothedHeights[i]
-        const y = centerY + barHeight / 2
-
-        ctx.lineTo(x, y)
-      }
-
-      // Close the path back to the progress position
-      const progressBottomY = centerY + progressBarHeight / 2
-      ctx.lineTo(progressX, progressBottomY)
-      ctx.closePath()
-
-      // Fill with the unplayed color
-      if (rainbowMode) {
-        const gradient = ctx.createLinearGradient(0, 0, width, 0)
-        gradient.addColorStop(0, "hsla(0, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.17, "hsla(60, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.33, "hsla(120, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.5, "hsla(180, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.67, "hsla(240, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.83, "hsla(270, 100%, 50%, 0.3)")
-        gradient.addColorStop(1, "hsla(300, 100%, 50%, 0.3)")
-        ctx.fillStyle = gradient
-      } else {
-        ctx.fillStyle = "hsla(178, 51%, 51%, 0.3)"
-      }
-      ctx.fill()
-    }
-
-    // Draw buffer status indicator
-    ctx.fillStyle = "rgba(255, 255, 255, 0.2)"
-    ctx.fillRect(0, height - 2, (bufferStatus / 100) * width, 2)
-
-    animationRef.current = requestAnimationFrame(drawWaveform)
-  }, [currentTime, duration, rainbowMode])
-
-  // Initialize canvas
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-
-    // Set canvas dimensions with proper scaling for high DPI displays
-    const dpr = window.devicePixelRatio || 1
-    const rect = canvas.getBoundingClientRect()
-
-    canvas.width = rect.width * dpr
-    canvas.height = rect.height * dpr
-
-    const ctx = canvas.getContext("2d")
-    if (ctx) {
-      ctx.scale(dpr, dpr)
-    }
-  }, [])
-
-  // Update visualization
-  useEffect(() => {
-    // Always keep the animation running when audio is loaded
-    if (isLoaded) {
-      // Resume audio context if it was suspended
-      if (audioContextRef.current && audioContextRef.current.state === "suspended") {
-        audioContextRef.current.resume()
-      }
-      animationRef.current = requestAnimationFrame(drawWaveform)
-    } else {
-      cancelAnimationFrame(animationRef.current)
-    }
-
-    return () => {
-      cancelAnimationFrame(animationRef.current)
-    }
-  }, [isLoaded, currentTime, drawWaveform])
-
-  // Handle play/pause
-  const togglePlay = useCallback(() => {
-    if (!audioContextRef.current || !isConnected) return
-
-    if (isPlaying) {
-      // Pause playback
-      if (audioBufferSourceRef.current) {
-        audioBufferSourceRef.current.stop()
-        audioBufferSourceRef.current = null
-
-        // Update playback position
-        const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current
-        playbackPositionRef.current += playedTime * sampleRate
-      }
-    } else {
-      // Resume audio context if needed
-      if (audioContextRef.current.state === "suspended") {
-        audioContextRef.current.resume()
-      }
-    }
-
-    setIsPlaying(!isPlaying)
-  }, [isConnected, isPlaying, sampleRate])
-
-  // Handle volume change
-  const handleVolumeChange = useCallback((newVolume: number[]) => {
-    const volumeValue = newVolume[0]
-    setVolume(volumeValue)
-
-    if (gainNodeRef.current) {
-      gainNodeRef.current.gain.value = volumeValue
-    }
-
-    if (volumeValue === 0) {
-      setIsMuted(true)
-    } else {
-      setIsMuted(false)
-    }
-  }, [])
-
   // Handle seeking with slider
   const handleSliderSeek = useCallback(
     (newTime: number[]) => {
@@ -627,48 +406,37 @@ export default function Player({
       const seekTime = newTime[0]
       const seekPosition = Math.floor(seekTime * sampleRate)
 
+      console.log("Seeking to position", {
+        seekTime,
+        seekPosition,
+        isPlaying,
+      })
+
       // Update playback position
       playbackPositionRef.current = seekPosition
       setCurrentTime(seekTime)
 
       // If we're playing, restart playback from the new position
-      if (isPlaying && audioBufferSourceRef.current) {
-        audioBufferSourceRef.current.stop()
-        audioBufferSourceRef.current = null
+      if (isPlaying && pcmDataRef.current.length > 0 && pcmDataRef.current[0].length > 0) {
+        if (audioBufferSourceRef.current) {
+          audioBufferSourceRef.current.stop()
+          audioBufferSourceRef.current = null
+        }
+
+        // Create a new buffer and play from the new position
+        const audioBuffer = audioContextRef.current.createBuffer(channels, pcmDataRef.current[0].length, sampleRate)
+
+        // Fill the audio buffer with our data
+        for (let c = 0; c < channels; c++) {
+          const channelData = audioBuffer.getChannelData(c)
+          channelData.set(pcmDataRef.current[c])
+        }
+
+        ensureAudioIsPlaying(audioBuffer)
       }
     },
-    [isPlaying, sampleRate],
+    [isPlaying, sampleRate, channels, ensureAudioIsPlaying],
   )
-
-  // Handle seeking with canvas click
-  const handleCanvasSeek = useCallback(
-    (event: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = canvasRef.current
-      if (!canvas || !audioContextRef.current || duration === 0) return
-
-      const rect = canvas.getBoundingClientRect()
-      const clickPosition = event.clientX - rect.left
-      const seekPercentage = clickPosition / rect.width
-      const seekTime = seekPercentage * duration
-
-      // Use the slider seek function to handle the actual seeking
-      handleSliderSeek([seekTime])
-    },
-    [duration, handleSliderSeek],
-  )
-
-  // Toggle mute
-  const toggleMute = useCallback(() => {
-    if (!gainNodeRef.current) return
-
-    if (isMuted) {
-      gainNodeRef.current.gain.value = volume
-      setIsMuted(false)
-    } else {
-      gainNodeRef.current.gain.value = 0
-      setIsMuted(true)
-    }
-  }, [isMuted, volume])
 
   // Format time
   const formatTime = useCallback((time: number) => {
@@ -704,18 +472,22 @@ export default function Player({
         const arrayBuffer = await response.arrayBuffer()
 
         if (audioWorkerRef.current) {
-          audioWorkerRef.current.postMessage(
-            {
+          try {
+            // Create a copy of the array buffer to avoid transfer issues
+            const arrayBufferCopy = arrayBuffer.slice(0)
+
+            audioWorkerRef.current.postMessage({
               type: "PROCESS_AUDIO",
               payload: {
-                arrayBuffer,
+                arrayBuffer: arrayBufferCopy,
                 bitDepth,
                 channels,
                 sampleRate,
               },
-            },
-            [arrayBuffer.slice(0)],
-          )
+            })
+          } catch (error) {
+            console.error("Error posting message to worker:", error)
+          }
         }
 
         setIsLoaded(true)
@@ -729,6 +501,60 @@ export default function Player({
 
     fetchAudioData()
   }, [httpUrl, bitDepth, channels, sampleRate, fetchMetadata])
+
+  // Toggle play/pause
+  const togglePlay = useCallback(() => {
+    if (!isConnected || !audioContextRef.current) return
+
+    console.log("Toggle play/pause", {
+      isPlaying: !isPlaying,
+      audioContextState: audioContextRef.current.state,
+      hasPcmData: pcmDataRef.current.length > 0 && pcmDataRef.current[0].length > 0,
+    })
+
+    // If we're going to start playing
+    if (!isPlaying) {
+      // Resume audio context if needed (important for Chrome)
+      if (audioContextRef.current.state === "suspended") {
+        audioContextRef.current.resume().then(() => {
+          console.log("Audio context resumed")
+        })
+      }
+
+      // If we have PCM data, create a buffer and play it
+      if (pcmDataRef.current.length > 0 && pcmDataRef.current[0].length > 0) {
+        const audioBuffer = audioContextRef.current.createBuffer(channels, pcmDataRef.current[0].length, sampleRate)
+
+        // Fill the audio buffer with our data
+        for (let c = 0; c < channels; c++) {
+          const channelData = audioBuffer.getChannelData(c)
+          channelData.set(pcmDataRef.current[c])
+        }
+
+        ensureAudioIsPlaying(audioBuffer)
+      } else {
+        console.warn("No PCM data available for playback")
+      }
+    } else {
+      // Stop playback
+      if (audioBufferSourceRef.current) {
+        audioBufferSourceRef.current.stop()
+
+        // Update playback position
+        if (audioContextRef.current) {
+          const playedTime = audioContextRef.current.currentTime - lastPlayTimeRef.current
+          playbackPositionRef.current += playedTime * sampleRate
+        }
+      }
+    }
+
+    setIsPlaying(!isPlaying)
+  }, [isPlaying, isConnected, channels, sampleRate, ensureAudioIsPlaying])
+
+  // Call this function when the component mounts
+  // useEffect(() => {
+  //   fetchAvailableFiles()
+  // }, [fetchAvailableFiles])
 
   return (
     <div className="fixed bottom-0 left-0 w-full h-[9vh] overflow-hidden -z-5 bg-sidebar">
@@ -773,19 +599,16 @@ export default function Player({
             <div className="w-full flex items-center gap-2">
               <span className="text-xs text-muted-foreground w-8 text-right">{formatTime(currentTime)}</span>
               <div className="relative flex-1 h-10">
-                {/* Canvas visualization */}
-                <canvas ref={canvasRef} className="w-full h-full cursor-pointer" onClick={handleCanvasSeek} />
-
-                {/* Invisible slider for accessibility */}
-                <div className="absolute inset-0 opacity-0 flex items-center">
-                  <Slider
-                    className="h-full"
-                    value={[currentTime]}
-                    max={duration || 100}
-                    step={0.1}
-                    onValueChange={handleSliderSeek}
-                  />
-                </div>
+                {/* Audio Visualizer Component */}
+                <AudioVisualizer
+                  currentTime={currentTime}
+                  duration={duration}
+                  bufferStatus={bufferStatus}
+                  rainbowMode={rainbowMode}
+                  analyser={analyserRef.current}
+                  dataArray={dataArrayRef.current}
+                  onSeek={handleSliderSeek}
+                />
               </div>
               <span className="text-xs text-muted-foreground w-8">{formatTime(duration)}</span>
             </div>
@@ -802,23 +625,6 @@ export default function Player({
             >
               {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 ml-0.5" />}
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-transparent"
-              onClick={toggleMute}
-              disabled={!isConnected}
-            >
-              {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
-            </Button>
-            <Slider
-              value={[isMuted ? 0 : volume]}
-              max={1}
-              step={0.01}
-              onValueChange={handleVolumeChange}
-              className="w-24"
-              disabled={!isConnected}
-            />
             <Button
               variant="ghost"
               size="icon"
@@ -844,6 +650,8 @@ export default function Player({
                 <path d="M3 21v-5h5" />
               </svg>
             </Button>
+            <div className="flex-4 mr-4"></div>
+            <ElasticSliderVariant1 />
           </div>
         </div>
       </div>
