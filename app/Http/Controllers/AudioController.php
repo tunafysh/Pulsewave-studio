@@ -5,155 +5,99 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Response;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
-use getID3;
 
 class AudioController extends Controller
 {
-    /**
-     * Stream audio file from the music directory
-     */
-    public function stream(Request $request)
+    protected $musicPath;
+
+    public function __construct()
     {
-        // Get file path from request or use default
-        $filePath = $request->input('file', null);
-        
-        // If no specific file is requested, get a PCM file from the music directory
-        if (!$filePath) {
-            $musicPath = base_path('music'); // Use project root music folder
-            $files = glob($musicPath . '/*.pcm');
-        
-            if (empty($files)) {
-                return response()->json(['error' => 'No PCM files found'], 404);
+        // Set the path to the music folder
+        $this->musicPath = base_path('music');
+    }
+
+    // Get a specific music file
+    public function getFile($filename = null)
+    {
+        if ($filename) {
+            $path = $this->musicPath . '/' . $filename;
+            
+            if (File::exists($path)) {
+                return Response::file($path, [
+                    'Content-Type' => 'audio/wav'
+                ]);
             }
-        
-            // Select the first PCM file
-            $filePath = $files[0];
-        } else {
-            // Make sure the file path is within the music directory
-            $filePath = base_path('music/' . $filePath);
-        
-            if (!file_exists($filePath)) {
-                return response()->json(['error' => 'File not found'], 404);
-            }
+            
+            return response()->json(['error' => 'File not found'], 404);
         }
         
-        // Get file size
-        $fileSize = filesize($filePath);
+        // If no filename is provided, return the first file
+        $files = $this->getFilesList();
+        if (count($files) > 0) {
+            $path = $this->musicPath . '/' . $files[0];
+            
+            return Response::file($path, [
+                'Content-Type' => 'audio/wav'
+            ]);
+        }
         
-        // Stream the raw PCM file directly
-        return response()->file($filePath, [
-            'Content-Type' => 'application/octet-stream',
-            'Content-Length' => $fileSize,
-            'Accept-Ranges' => 'bytes',
-            'Cache-Control' => 'no-cache',
-            'Access-Control-Allow-Origin' => '*', // For CORS
+        return response()->json(['error' => 'No music files found'], 404);
+    }
+    
+    // Get metadata for a specific file
+    public function getMetadata($filename = null)
+    {
+        if ($filename) {
+            $path = $this->musicPath . '/' . $filename;
+            
+            if (File::exists($path)) {
+                // In a real app, you might extract metadata from the WAV file
+                // For now, we'll just return the filename as the title
+                return response()->json([
+                    'title' => pathinfo($filename, PATHINFO_FILENAME),
+                    'artist' => 'Unknown Artist',
+                    'image' => asset('images/default-album.jpg')
+                ]);
+            }
+            
+            return response()->json(['error' => 'File not found'], 404);
+        }
+        
+        // Default metadata
+        return response()->json([
+            'title' => 'Music Library',
+            'artist' => 'Various Artists',
+            'image' => asset('images/default-album.jpg')
         ]);
     }
     
-    /**
-     * Get metadata for the current audio file
-     */
-    public function metadata(Request $request)
+    // List all music files
+    public function listFiles()
     {
-        // Get file path from request or use default
-        $filePath = $request->input('file', null);
+        $files = $this->getFilesList();
         
-        // If no specific file is requested, get a random file from the music directory
-        if (!$filePath) {
-            $musicPath = storage_path('app/music');
-            $files = $this->getAudioFiles($musicPath);
-            
-            if (empty($files)) {
-                return response()->json(['error' => 'No audio files found'], 404);
-            }
-            
-            // Select a random file
-            $filePath = $files[array_rand($files)];
-        } else {
-            // Make sure the file path is within the music directory
-            $filePath = storage_path('app/music/' . $filePath);
-            
-            if (!file_exists($filePath)) {
-                return response()->json(['error' => 'File not found'], 404);
-            }
-        }
-        
-        // Extract metadata using getID3 library (you'll need to install this)
-        // composer require james-heinrich/getid3
-        $metadata = $this->extractMetadata($filePath);
-        
-        return response()->json($metadata);
+        return response()->json([
+            'files' => $files
+        ]);
     }
     
-    /**
-     * Get all audio files from a directory recursively
-     */
-    private function getAudioFiles($directory)
+    // Helper method to get all WAV files
+    protected function getFilesList()
     {
-        $audioFiles = [];
-        $files = File::allFiles($directory);
+        if (!File::exists($this->musicPath)) {
+            File::makeDirectory($this->musicPath, 0755, true);
+        }
+        
+        $files = File::files($this->musicPath);
+        $fileNames = [];
         
         foreach ($files as $file) {
             $extension = strtolower($file->getExtension());
-            if (in_array($extension, ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a'])) {
-                $audioFiles[] = $file->getPathname();
+            if ($extension === 'wav') {
+                $fileNames[] = $file->getFilename();
             }
         }
         
-        return $audioFiles;
-    }
-    
-    /**
-     * Get content type based on file extension
-     */
-    private function getContentType($extension)
-    {
-        $contentTypes = [
-            'mp3' => 'audio/mpeg',
-            'wav' => 'audio/wav',
-            'ogg' => 'audio/ogg',
-            'flac' => 'audio/flac',
-            'aac' => 'audio/aac',
-            'm4a' => 'audio/mp4',
-        ];
-        
-        return $contentTypes[$extension] ?? 'application/octet-stream';
-    }
-    
-    /**
-     * Extract metadata from audio file
-     */
-    private function extractMetadata($filePath)
-    {
-        // Initialize getID3 engine
-        $getID3 = new getID3();
-        
-        // Analyze file
-        $fileInfo = $getID3->analyze($filePath);
-        
-        // Extract basic metadata
-        $metadata = [
-            'title' => $fileInfo['tags']['id3v2']['title'][0] ?? $fileInfo['tags']['id3v1']['title'][0] ?? basename($filePath),
-            'artist' => $fileInfo['tags']['id3v2']['artist'][0] ?? $fileInfo['tags']['id3v1']['artist'][0] ?? 'Unknown Artist',
-            'album' => $fileInfo['tags']['id3v2']['album'][0] ?? $fileInfo['tags']['id3v1']['album'][0] ?? 'Unknown Album',
-            'duration' => $fileInfo['playtime_seconds'] ?? 0,
-            'bitrate' => $fileInfo['audio']['bitrate'] ?? 0,
-            'sampleRate' => $fileInfo['audio']['sample_rate'] ?? 44100,
-            'channels' => $fileInfo['audio']['channels'] ?? 2,
-            'format' => $fileInfo['fileformat'] ?? 'unknown',
-        ];
-        
-        // Extract cover art if available
-        if (isset($fileInfo['id3v2']['APIC'][0]['data'])) {
-            $imageData = $fileInfo['id3v2']['APIC'][0]['data'];
-            $base64Image = base64_encode($imageData);
-            $mimeType = $fileInfo['id3v2']['APIC'][0]['mime'] ?? 'image/jpeg';
-            $metadata['image'] = "data:{$mimeType};base64,{$base64Image}";
-        }
-        
-        return $metadata;
+        return $fileNames;
     }
 }
-

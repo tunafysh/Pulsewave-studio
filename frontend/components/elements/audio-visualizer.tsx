@@ -8,7 +8,6 @@ import { Slider } from "@/components/ui/slider"
 interface AudioVisualizerProps {
   currentTime: number
   duration: number
-  bufferStatus: number
   rainbowMode: boolean
   analyser: AnalyserNode | null
   dataArray: Uint8Array | null
@@ -18,7 +17,6 @@ interface AudioVisualizerProps {
 export default function AudioVisualizer({
   currentTime,
   duration,
-  bufferStatus,
   rainbowMode,
   analyser,
   dataArray,
@@ -79,11 +77,8 @@ export default function AudioVisualizer({
       // Calculate normalized position (0 to 1)
       const normalizedPosition = i / (segmentCount - 1)
 
-      // Create a symmetrical pattern where the middle has the highest values
-      const patternPosition =
-        normalizedPosition <= 0.5
-          ? (1 - normalizedPosition) * 2 // 0 to 1 (first half)
-          : normalizedPosition * 2 - 1 // 1 to 0 (second half)
+      // Create a symmetrical pattern where the middle has the highest values (low, high, low)
+      const patternPosition = Math.abs(normalizedPosition * 2 - 1) // 1 to 0 to 1
 
       // Map this position to our frequency data
       const dataIndex = Math.floor(patternPosition * usableDataLength * 0.5)
@@ -123,6 +118,28 @@ export default function AudioVisualizer({
 
     // Calculate the center line of the waveform
     const centerY = height / 2
+
+    // Create a gradient that represents the duration
+    const createDurationGradient = (ctx: CanvasRenderingContext2D, alpha = 1) => {
+      const gradient = ctx.createLinearGradient(0, 0, width, 0)
+
+      if (rainbowMode) {
+        // Rainbow gradient
+        gradient.addColorStop(0, `hsla(0, 100%, 50%, ${alpha})`) // Red
+        gradient.addColorStop(0.17, `hsla(60, 100%, 50%, ${alpha})`) // Yellow
+        gradient.addColorStop(0.33, `hsla(120, 100%, 50%, ${alpha})`) // Green
+        gradient.addColorStop(0.5, `hsla(180, 100%, 50%, ${alpha})`) // Cyan
+        gradient.addColorStop(0.67, `hsla(240, 100%, 50%, ${alpha})`) // Blue
+        gradient.addColorStop(0.83, `hsla(270, 100%, 50%, ${alpha})`) // Purple
+        gradient.addColorStop(1, `hsla(300, 100%, 50%, ${alpha})`) // Pink
+      } else {
+        // Primary color gradient that changes hue slightly across duration
+        gradient.addColorStop(0, `hsla(178, 51%, 51%, ${alpha})`)
+        gradient.addColorStop(1, `hsla(178, 51%, 51%, ${alpha})`)
+      }
+
+      return gradient
+    }
 
     // Draw the played portion
     if (progressPosition > 0) {
@@ -168,20 +185,8 @@ export default function AudioVisualizer({
       ctx.lineTo(0, centerY)
       ctx.closePath()
 
-      // Fill with the played color
-      if (rainbowMode) {
-        const gradient = ctx.createLinearGradient(0, 0, width, 0)
-        gradient.addColorStop(0, "hsl(0, 100%, 50%)") // Red
-        gradient.addColorStop(0.17, "hsl(60, 100%, 50%)") // Yellow
-        gradient.addColorStop(0.33, "hsl(120, 100%, 50%)") // Green
-        gradient.addColorStop(0.5, "hsl(180, 100%, 50%)") // Cyan
-        gradient.addColorStop(0.67, "hsl(240, 100%, 50%)") // Blue
-        gradient.addColorStop(0.83, "hsl(270, 100%, 50%)") // Purple
-        gradient.addColorStop(1, "hsl(300, 100%, 50%)") // Pink
-        ctx.fillStyle = gradient
-      } else {
-        ctx.fillStyle = "hsl(178, 51%, 51%)"
-      }
+      // Fill with the duration-based gradient
+      ctx.fillStyle = createDurationGradient(ctx, 1)
       ctx.fill()
     }
 
@@ -229,29 +234,13 @@ export default function AudioVisualizer({
       ctx.lineTo(progressX, progressBottomY)
       ctx.closePath()
 
-      // Fill with the unplayed color
-      if (rainbowMode) {
-        const gradient = ctx.createLinearGradient(0, 0, width, 0)
-        gradient.addColorStop(0, "hsla(0, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.17, "hsla(60, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.33, "hsla(120, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.5, "hsla(180, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.67, "hsla(240, 100%, 50%, 0.3)")
-        gradient.addColorStop(0.83, "hsla(270, 100%, 50%, 0.3)")
-        gradient.addColorStop(1, "hsla(300, 100%, 50%, 0.3)")
-        ctx.fillStyle = gradient
-      } else {
-        ctx.fillStyle = "hsla(178, 51%, 51%, 0.3)"
-      }
+      // Fill with the faded duration-based gradient
+      ctx.fillStyle = createDurationGradient(ctx, 0.3)
       ctx.fill()
     }
 
-    // Draw buffer status indicator
-    ctx.fillStyle = "rgba(255, 255, 255, 0.2)"
-    ctx.fillRect(0, height - 2, (bufferStatus / 100) * width, 2)
-
     animationRef.current = requestAnimationFrame(drawWaveform)
-  }, [currentTime, duration, rainbowMode, bufferStatus, analyser, dataArray])
+  }, [currentTime, duration, rainbowMode, analyser, dataArray])
 
   // Update visualization
   useEffect(() => {

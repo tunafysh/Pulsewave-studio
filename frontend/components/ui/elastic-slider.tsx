@@ -24,7 +24,7 @@ export default function ElasticSliderVariant1() {
 }
 
 function Slider() {
-  const [volume, setVolume] = useState(50);
+  const [volume, setVolume] = useState(100);
   const ref = useRef<ElementRef<typeof RadixSlider.Root>>(null);
   const [region, setRegion] = useState("middle");
   const clientX = useMotionValue(0);
